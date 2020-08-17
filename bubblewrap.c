@@ -122,6 +122,7 @@ typedef enum {
   SETUP_MOUNT_DEV,
   SETUP_MOUNT_TMPFS,
   SETUP_MOUNT_MQUEUE,
+  SETUP_MOUNT_FUSE,
   SETUP_MAKE_DIR,
   SETUP_MAKE_FILE,
   SETUP_MAKE_BIND_FILE,
@@ -169,6 +170,7 @@ enum {
   PRIV_SEP_OP_TMPFS_MOUNT,
   PRIV_SEP_OP_DEVPTS_MOUNT,
   PRIV_SEP_OP_MQUEUE_MOUNT,
+  PRIV_SEP_OP_FUSE_MOUNT,
   PRIV_SEP_OP_REMOUNT_RO_NO_RECURSIVE,
   PRIV_SEP_OP_SET_HOSTNAME,
 };
@@ -250,6 +252,7 @@ usage (int ecode, FILE *out)
            "    --dev-bind-try SRC DEST      Equal to --dev-bind but ignores non-existent SRC\n"
            "    --ro-bind SRC DEST           Bind mount the host path SRC readonly on DEST\n"
            "    --ro-bind-try SRC DEST       Equal to --ro-bind but ignores non-existent SRC\n"
+           "    --fuse FD DEST               Mount FUSE FD on DEST\n"
            "    --remount-ro DEST            Remount DEST as readonly; does not recursively remount\n"
            "    --exec-label LABEL           Exec label for the sandbox\n"
            "    --file-label LABEL           File label for temporary sandbox content\n"
@@ -1041,6 +1044,15 @@ privileged_op (int         privileged_op_socket,
         die_with_error ("Can't mount mqueue on %s", arg1);
       break;
 
+    case PRIV_SEP_OP_FUSE_MOUNT:
+      {
+        cleanup_free char *opt = xasprintf ("fd=%s,rootmode=40000,user_id=%d,group_id=%d",
+                                            arg1, opt_sandbox_uid, opt_sandbox_gid);
+        if (mount ("fuse", arg2, "fuse", MS_NOSUID | MS_NODEV, opt) != 0)
+          die_with_error ("Can't mount FUSE FD %s on %s", arg1, arg2);
+        break;
+      }
+
     case PRIV_SEP_OP_SET_HOSTNAME:
       /* This is checked at the start, but lets verify it here in case
          something manages to send hacked priv-sep operation requests. */
@@ -1253,6 +1265,20 @@ setup_newroot (bool unshare_pid,
           privileged_op (privileged_op_socket,
                          PRIV_SEP_OP_MQUEUE_MOUNT, 0,
                          dest, NULL);
+          break;
+
+        case SETUP_MOUNT_FUSE:
+          {
+            cleanup_free char *fd_str = xasprintf ("%d", op->fd);
+
+            if (ensure_dir (dest, 0755) != 0)
+              die_with_error ("Can't mkdir %s", op->dest);
+
+            privileged_op (privileged_op_socket,
+                           PRIV_SEP_OP_FUSE_MOUNT, 0,
+                           fd_str, dest);
+            close(op->fd);
+          }
           break;
 
         case SETUP_MAKE_DIR:
@@ -1717,6 +1743,25 @@ parse_args_recurse (int          *argcp,
 
           argv += 1;
           argc -= 1;
+        }
+      else if (strcmp (arg, "--fuse") == 0)
+        {
+          int fuse_fd;
+          char *endptr;
+
+          if (argc < 3)
+            die ("%s takes two arguments", arg);
+
+          fuse_fd = strtol (argv[1], &endptr, 10);
+          if (argv[1][0] == 0 || endptr[0] != 0 || fuse_fd < 0)
+            die ("Invalid fd: %s", argv[1]);
+
+          op = setup_op_new (SETUP_MOUNT_FUSE);
+          op->fd = fuse_fd;
+          op->dest = argv[2];
+
+          argv += 2;
+          argc -= 2;
         }
       else if (strcmp (arg, "--dir") == 0)
         {
